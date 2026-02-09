@@ -111,7 +111,7 @@ def list_warehouses() -> list[str]:
 
 
 @st.cache_data(ttl=60)
-def run_running_queries_fallback(warehouse: str) -> pd.DataFrame:
+def run_running_queries_fallback(warehouse: str, minutes: int) -> pd.DataFrame:
     sql = """
     SELECT
       QUERY_ID,
@@ -123,14 +123,14 @@ def run_running_queries_fallback(warehouse: str) -> pd.DataFrame:
       QUERY_TEXT
     FROM TABLE(
       INFORMATION_SCHEMA.QUERY_HISTORY(
-        END_TIME_RANGE_START=>DATEADD('hour', -1, CURRENT_TIMESTAMP())
+        END_TIME_RANGE_START=>DATEADD('minute', -%(minutes)s, CURRENT_TIMESTAMP())
       )
     )
     WHERE WAREHOUSE_NAME = %(warehouse)s
       AND END_TIME IS NULL
     ORDER BY START_TIME DESC
     """
-    return run_query(sql, {"warehouse": warehouse})
+    return run_query(sql, {"warehouse": warehouse, "minutes": minutes})
 
 
 def to_ts_range(start_d: date, end_d: date) -> tuple[str, str]:
@@ -180,6 +180,12 @@ with st.sidebar:
         options=wh_options,
         default=[default_wh] if default_wh in wh_options else [wh_options[0]],
         help="Select one or more for analytics. Live running view needs a single warehouse.",
+    )
+    fallback_window = st.selectbox(
+        "Running fallback window",
+        options=[15, 30, 60, 120],
+        index=2,
+        help="Used only when SHOW QUERIES is unavailable.",
     )
     user_filter = st.text_input("User (optional)")
     query_tag = st.text_input("Query tag (optional)")
@@ -288,7 +294,7 @@ if warehouses and "ALL" not in warehouses and len(warehouses) == 1:
         running_df = running_df[running_df["execution_status"] == "RUNNING"]
     if running_df.empty:
         st.info("SHOW QUERIES unavailable or empty. Using INFORMATION_SCHEMA fallback.")
-        running_df = run_running_queries_fallback(warehouses[0])
+        running_df = run_running_queries_fallback(warehouses[0], fallback_window)
     st.dataframe(running_df, use_container_width=True)
 else:
     st.info("Select a single warehouse to view running queries.")
