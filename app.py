@@ -110,6 +110,29 @@ def list_warehouses() -> list[str]:
     return [r[0] for r in rows]
 
 
+@st.cache_data(ttl=60)
+def run_running_queries_fallback(warehouse: str) -> pd.DataFrame:
+    sql = """
+    SELECT
+      QUERY_ID,
+      USER_NAME,
+      WAREHOUSE_NAME,
+      START_TIME,
+      TOTAL_ELAPSED_TIME,
+      EXECUTION_STATUS,
+      QUERY_TEXT
+    FROM TABLE(
+      INFORMATION_SCHEMA.QUERY_HISTORY(
+        END_TIME_RANGE_START=>DATEADD('hour', -1, CURRENT_TIMESTAMP())
+      )
+    )
+    WHERE WAREHOUSE_NAME = %(warehouse)s
+      AND END_TIME IS NULL
+    ORDER BY START_TIME DESC
+    """
+    return run_query(sql, {"warehouse": warehouse})
+
+
 def to_ts_range(start_d: date, end_d: date) -> tuple[str, str]:
     start_ts = datetime.combine(start_d, time.min)
     end_ts = datetime.combine(end_d, time.max)
@@ -263,6 +286,9 @@ if warehouses and "ALL" not in warehouses and len(warehouses) == 1:
     running_df = run_show_queries(warehouses[0])
     if "execution_status" in running_df.columns:
         running_df = running_df[running_df["execution_status"] == "RUNNING"]
+    if running_df.empty:
+        st.info("SHOW QUERIES unavailable or empty. Using INFORMATION_SCHEMA fallback.")
+        running_df = run_running_queries_fallback(warehouses[0])
     st.dataframe(running_df, use_container_width=True)
 else:
     st.info("Select a single warehouse to view running queries.")
