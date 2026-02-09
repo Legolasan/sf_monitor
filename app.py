@@ -1,0 +1,251 @@
+import os
+from datetime import date, datetime, time, timedelta
+
+import pandas as pd
+import streamlit as st
+import snowflake.connector
+
+DEFAULT_WAREHOUSE = "FIVETRAN_WAREHOUSE"
+LONG_RUNNING_MS = 10 * 60 * 1000
+
+
+st.set_page_config(page_title="Snowflake Query Monitor", layout="wide")
+
+
+@st.cache_resource
+def get_connection():
+    cfg = {
+        "account": os.getenv("SNOWFLAKE_ACCOUNT", ""),
+        "user": os.getenv("SNOWFLAKE_USER", ""),
+        "password": os.getenv("SNOWFLAKE_PASSWORD", ""),
+        "warehouse": os.getenv("SNOWFLAKE_WAREHOUSE", DEFAULT_WAREHOUSE),
+        "database": os.getenv("SNOWFLAKE_DATABASE", ""),
+        "schema": os.getenv("SNOWFLAKE_SCHEMA", ""),
+        "role": os.getenv("SNOWFLAKE_ROLE", ""),
+    }
+    missing = [k for k, v in cfg.items() if k in {"account", "user", "password"} and not v]
+    if missing:
+        st.error("Missing Snowflake env vars: " + ", ".join(missing))
+        st.stop()
+    return snowflake.connector.connect(**{k: v for k, v in cfg.items() if v})
+
+
+@st.cache_data(ttl=300)
+def run_query(sql: str, params: dict | None = None) -> pd.DataFrame:
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(sql, params or {})
+        df = cur.fetch_pandas_all()
+    finally:
+        cur.close()
+    return df
+
+
+def run_show_queries(warehouse: str) -> pd.DataFrame:
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(f"SHOW QUERIES IN WAREHOUSE {warehouse}")
+        cur.execute("SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))")
+        df = cur.fetch_pandas_all()
+    finally:
+        cur.close()
+    return df
+
+
+@st.cache_data(ttl=300)
+def list_warehouses() -> list[str]:
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SHOW WAREHOUSES")
+        cur.execute("SELECT NAME FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) ORDER BY NAME")
+        rows = cur.fetchall()
+    finally:
+        cur.close()
+    return [r[0] for r in rows]
+
+
+def to_ts_range(start_d: date, end_d: date) -> tuple[str, str]:
+    start_ts = datetime.combine(start_d, time.min)
+    end_ts = datetime.combine(end_d, time.max)
+    return start_ts.isoformat(sep=" "), end_ts.isoformat(sep=" ")
+
+
+st.title("Snowflake Query Monitor")
+
+with st.sidebar:
+    st.header("Filters")
+    if st.button("Refresh data"):
+        st.cache_data.clear()
+        st.rerun()
+    preset = st.selectbox(
+        "Time window",
+        ["24h", "7d", "30d", "Custom"],
+        index=1,
+        help="ACCOUNT_USAGE can lag by ~45–90 minutes.",
+    )
+
+    today = date.today()
+    if preset == "24h":
+        start_date = today - timedelta(days=1)
+        end_date = today
+    elif preset == "7d":
+        start_date = today - timedelta(days=7)
+        end_date = today
+    elif preset == "30d":
+        start_date = today - timedelta(days=30)
+        end_date = today
+    else:
+        start_date, end_date = st.date_input("Date range", value=(today - timedelta(days=7), today))
+
+    default_wh = os.getenv("SNOWFLAKE_WAREHOUSE", DEFAULT_WAREHOUSE)
+    wh_options = ["ALL"]
+    try:
+        wh_options.extend(list_warehouses())
+    except Exception:
+        wh_options.append(default_wh)
+    if default_wh not in wh_options:
+        wh_options.append(default_wh)
+    wh_options = list(dict.fromkeys(wh_options))
+    warehouses = st.multiselect(
+        "Warehouses",
+        options=wh_options,
+        default=[default_wh] if default_wh in wh_options else [wh_options[0]],
+        help="Select one or more for analytics. Live running view needs a single warehouse.",
+    )
+    user_filter = st.text_input("User (optional)")
+    query_tag = st.text_input("Query tag (optional)")
+
+start_ts, end_ts = to_ts_range(start_date, end_date)
+
+base_filters = [
+    "START_TIME >= %(start_ts)s",
+    "START_TIME <= %(end_ts)s",
+]
+params = {"start_ts": start_ts, "end_ts": end_ts}
+
+if warehouses and "ALL" not in warehouses:
+    wh_placeholders = []
+    for idx, wh in enumerate(warehouses):
+        key = f"wh_{idx}"
+        params[key] = wh
+        wh_placeholders.append(f"%({key})s")
+    base_filters.append(f"WAREHOUSE_NAME IN ({', '.join(wh_placeholders)})")
+
+if user_filter:
+    base_filters.append("USER_NAME = %(user_name)s")
+    params["user_name"] = user_filter
+if query_tag:
+    base_filters.append("QUERY_TAG = %(query_tag)s")
+    params["query_tag"] = query_tag
+
+base_where = " AND ".join(base_filters)
+
+
+st.subheader("Status Overview")
+status_sql = f"""
+SELECT
+  EXECUTION_STATUS,
+  COUNT(*) AS QUERY_COUNT
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE {base_where}
+GROUP BY 1
+ORDER BY QUERY_COUNT DESC
+"""
+status_df = run_query(status_sql, params)
+status_col1, status_col2 = st.columns([1, 2])
+with status_col1:
+    st.dataframe(status_df, use_container_width=True)
+with status_col2:
+    if not status_df.empty:
+        st.bar_chart(status_df.set_index("EXECUTION_STATUS"))
+
+
+st.subheader("Top 10 Queries")
+col_a, col_b, col_c = st.columns(3)
+
+metric_sql = f"""
+SELECT
+  QUERY_ID,
+  USER_NAME,
+  WAREHOUSE_NAME,
+  START_TIME,
+  TOTAL_ELAPSED_TIME,
+  BYTES_SCANNED,
+  CREDITS_USED_CLOUD_SERVICES,
+  QUERY_TEXT
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE {base_where}
+"""
+base_df = run_query(metric_sql, params)
+
+with col_a:
+    st.caption("Top 10 by total runtime (ms)")
+    df = base_df.sort_values("TOTAL_ELAPSED_TIME", ascending=False).head(10)
+    st.dataframe(df, use_container_width=True)
+
+with col_b:
+    st.caption("Top 10 by bytes scanned")
+    df = base_df.sort_values("BYTES_SCANNED", ascending=False).head(10)
+    st.dataframe(df, use_container_width=True)
+
+with col_c:
+    st.caption("Top 10 by cloud services credits")
+    df = base_df.sort_values("CREDITS_USED_CLOUD_SERVICES", ascending=False).head(10)
+    st.dataframe(df, use_container_width=True)
+
+
+st.subheader("Long-Running Queries (>10 minutes)")
+long_sql = f"""
+SELECT
+  QUERY_ID,
+  USER_NAME,
+  WAREHOUSE_NAME,
+  START_TIME,
+  TOTAL_ELAPSED_TIME,
+  EXECUTION_STATUS,
+  QUERY_TEXT
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE {base_where}
+  AND TOTAL_ELAPSED_TIME >= {LONG_RUNNING_MS}
+ORDER BY TOTAL_ELAPSED_TIME DESC
+"""
+st.dataframe(run_query(long_sql, params), use_container_width=True)
+
+
+st.subheader("Currently Running (SHOW QUERIES)")
+if warehouses and "ALL" not in warehouses and len(warehouses) == 1:
+    running_df = run_show_queries(warehouses[0])
+    if "execution_status" in running_df.columns:
+        running_df = running_df[running_df["execution_status"] == "RUNNING"]
+    st.dataframe(running_df, use_container_width=True)
+else:
+    st.info("Select a single warehouse to view running queries.")
+
+
+st.subheader("Raw Query History")
+raw_sql = f"""
+SELECT
+  QUERY_ID,
+  USER_NAME,
+  WAREHOUSE_NAME,
+  DATABASE_NAME,
+  SCHEMA_NAME,
+  START_TIME,
+  END_TIME,
+  TOTAL_ELAPSED_TIME,
+  BYTES_SCANNED,
+  ROWS_PRODUCED,
+  EXECUTION_STATUS,
+  QUERY_TAG,
+  QUERY_TEXT
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE {base_where}
+ORDER BY START_TIME DESC
+LIMIT 500
+"""
+st.dataframe(run_query(raw_sql, params), use_container_width=True)
+
+st.caption("Tip: ACCOUNT_USAGE data can lag 45–90 minutes. Use SHOW QUERIES for near real-time running queries.")
