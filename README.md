@@ -28,7 +28,23 @@ pip install -r requirements.txt
 
 ## Configure
 
-Set environment variables (minimum required: `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD`):
+Option A: `config.json` (recommended for local dev)
+
+Create a `config.json` file in the repo root (it is gitignored):
+
+```json
+{
+  "account": "xxx",
+  "user": "xxx",
+  "password": "xxx",
+  "warehouse": "FIVETRAN_WAREHOUSE",
+  "role": "xxx",
+  "database": "xxx",
+  "schema": "xxx"
+}
+```
+
+Option B: environment variables (minimum required: `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD`):
 
 ```
 export SNOWFLAKE_ACCOUNT=...
@@ -40,6 +56,8 @@ export SNOWFLAKE_ROLE=...
 export SNOWFLAKE_DATABASE=...
 export SNOWFLAKE_SCHEMA=...
 ```
+
+Environment variables override values in `config.json` when both are provided.
 
 ## Run
 

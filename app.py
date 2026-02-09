@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import date, datetime, time, timedelta
 
@@ -14,21 +15,41 @@ st.set_page_config(page_title="Snowflake Query Monitor", layout="wide")
 
 @st.cache_resource
 def get_connection():
-    cfg = {
+    cfg = load_config()
+    missing = [k for k, v in cfg.items() if k in {"account", "user", "password"} and not v]
+    if missing:
+        st.error("Missing Snowflake credentials (config.json or env vars): " + ", ".join(missing))
+        st.stop()
+    return snowflake.connector.connect(**{k: v for k, v in cfg.items() if v})
+
+
+def load_config() -> dict:
+    cfg = {}
+    config_path = os.path.join(os.getcwd(), "config.json")
+    if os.path.isfile(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f) or {}
+        except (OSError, json.JSONDecodeError):
+            st.warning("Could not read config.json. Falling back to environment variables.")
+            cfg = {}
+
+    env_override = {
         "account": os.getenv("SNOWFLAKE_ACCOUNT", ""),
         "user": os.getenv("SNOWFLAKE_USER", ""),
         "password": os.getenv("SNOWFLAKE_PASSWORD", ""),
-        "warehouse": os.getenv("SNOWFLAKE_WAREHOUSE", DEFAULT_WAREHOUSE),
+        "warehouse": os.getenv("SNOWFLAKE_WAREHOUSE", ""),
         "database": os.getenv("SNOWFLAKE_DATABASE", ""),
         "schema": os.getenv("SNOWFLAKE_SCHEMA", ""),
         "role": os.getenv("SNOWFLAKE_ROLE", ""),
     }
-    missing = [k for k, v in cfg.items() if k in {"account", "user", "password"} and not v]
-    if missing:
-        st.error("Missing Snowflake env vars: " + ", ".join(missing))
-        st.stop()
-    return snowflake.connector.connect(**{k: v for k, v in cfg.items() if v})
+    for key, value in env_override.items():
+        if value:
+            cfg[key] = value
 
+    if "warehouse" not in cfg or not cfg["warehouse"]:
+        cfg["warehouse"] = DEFAULT_WAREHOUSE
+    return cfg
 
 @st.cache_data(ttl=300)
 def run_query(sql: str, params: dict | None = None) -> pd.DataFrame:
