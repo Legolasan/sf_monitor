@@ -5,6 +5,7 @@ from datetime import date, datetime, time, timedelta
 import pandas as pd
 import streamlit as st
 import snowflake.connector
+from snowflake.connector import errors as sf_errors
 
 DEFAULT_WAREHOUSE = "FIVETRAN_WAREHOUSE"
 LONG_RUNNING_MS = 10 * 60 * 1000
@@ -76,9 +77,21 @@ def run_show_queries(warehouse: str) -> pd.DataFrame:
     conn = get_connection()
     cur = conn.cursor()
     try:
-        cur.execute(f"SHOW QUERIES IN WAREHOUSE {warehouse}")
-        cur.execute("SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))")
-        df = cur.fetch_pandas_all()
+        try:
+            cur.execute(
+                "SHOW QUERIES IN WAREHOUSE IDENTIFIER(%(warehouse)s)",
+                {"warehouse": warehouse},
+            )
+            cur.execute("SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))")
+            df = cur.fetch_pandas_all()
+        except sf_errors.ProgrammingError as exc:
+            st.warning(
+                "Live running queries are unavailable. "
+                "Ensure your role has MONITOR privilege and that SHOW QUERIES "
+                "is supported in your account."
+            )
+            st.caption(f"Snowflake error: {exc}")
+            df = pd.DataFrame()
     finally:
         cur.close()
     return df
