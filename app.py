@@ -214,113 +214,212 @@ if query_tag:
     params["query_tag"] = query_tag
 
 base_where = " AND ".join(base_filters)
+wh_filter_sql = ""
+wh_params: dict[str, str] = {}
+if warehouses and "ALL" not in warehouses:
+    wh_placeholders = []
+    for idx, wh in enumerate(warehouses):
+        key = f"wh_{idx}"
+        wh_params[key] = wh
+        wh_placeholders.append(f"%({key})s")
+    wh_filter_sql = f"AND WAREHOUSE_NAME IN ({', '.join(wh_placeholders)})"
 
+tab_overview, tab_cost = st.tabs(["Overview", "Cost Monitor"])
 
-st.subheader("Status Overview")
-status_sql = f"""
-SELECT
-  EXECUTION_STATUS,
-  COUNT(*) AS QUERY_COUNT
-FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-WHERE {base_where}
-GROUP BY 1
-ORDER BY QUERY_COUNT DESC
-"""
-status_df = run_query(status_sql, params)
-status_col1, status_col2 = st.columns([1, 2])
-with status_col1:
-    st.dataframe(status_df, use_container_width=True)
-with status_col2:
-    if not status_df.empty:
-        st.bar_chart(status_df.set_index("EXECUTION_STATUS"))
+with tab_overview:
+    st.subheader("Status Overview")
+    status_sql = f"""
+    SELECT
+      EXECUTION_STATUS,
+      COUNT(*) AS QUERY_COUNT
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE {base_where}
+    GROUP BY 1
+    ORDER BY QUERY_COUNT DESC
+    """
+    status_df = run_query(status_sql, params)
+    status_col1, status_col2 = st.columns([1, 2])
+    with status_col1:
+        st.dataframe(status_df, use_container_width=True)
+    with status_col2:
+        if not status_df.empty:
+            st.bar_chart(status_df.set_index("EXECUTION_STATUS"))
 
+    st.subheader("Top 10 Queries")
 
-st.subheader("Top 10 Queries")
-col_a, col_b, col_c = st.columns(3)
+    metric_sql = f"""
+    SELECT
+      QUERY_ID,
+      USER_NAME,
+      WAREHOUSE_NAME,
+      START_TIME,
+      TOTAL_ELAPSED_TIME,
+      BYTES_SCANNED,
+      CREDITS_USED_CLOUD_SERVICES,
+      QUERY_TEXT
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE {base_where}
+    """
+    base_df = run_query(metric_sql, params)
 
-metric_sql = f"""
-SELECT
-  QUERY_ID,
-  USER_NAME,
-  WAREHOUSE_NAME,
-  START_TIME,
-  TOTAL_ELAPSED_TIME,
-  BYTES_SCANNED,
-  CREDITS_USED_CLOUD_SERVICES,
-  QUERY_TEXT
-FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-WHERE {base_where}
-"""
-base_df = run_query(metric_sql, params)
-
-with col_a:
     st.caption("Top 10 by total runtime (ms)")
     df = base_df.sort_values("TOTAL_ELAPSED_TIME", ascending=False).head(10)
     st.dataframe(df, use_container_width=True)
+    st.divider()
 
-with col_b:
     st.caption("Top 10 by bytes scanned")
     df = base_df.sort_values("BYTES_SCANNED", ascending=False).head(10)
     st.dataframe(df, use_container_width=True)
+    st.divider()
 
-with col_c:
     st.caption("Top 10 by cloud services credits")
     df = base_df.sort_values("CREDITS_USED_CLOUD_SERVICES", ascending=False).head(10)
     st.dataframe(df, use_container_width=True)
 
+    st.subheader("Long-Running Queries (>10 minutes)")
+    long_sql = f"""
+    SELECT
+      QUERY_ID,
+      USER_NAME,
+      WAREHOUSE_NAME,
+      START_TIME,
+      TOTAL_ELAPSED_TIME,
+      EXECUTION_STATUS,
+      QUERY_TEXT
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE {base_where}
+      AND TOTAL_ELAPSED_TIME >= {LONG_RUNNING_MS}
+    ORDER BY TOTAL_ELAPSED_TIME DESC
+    """
+    st.dataframe(run_query(long_sql, params), use_container_width=True)
 
-st.subheader("Long-Running Queries (>10 minutes)")
-long_sql = f"""
-SELECT
-  QUERY_ID,
-  USER_NAME,
-  WAREHOUSE_NAME,
-  START_TIME,
-  TOTAL_ELAPSED_TIME,
-  EXECUTION_STATUS,
-  QUERY_TEXT
-FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-WHERE {base_where}
-  AND TOTAL_ELAPSED_TIME >= {LONG_RUNNING_MS}
-ORDER BY TOTAL_ELAPSED_TIME DESC
-"""
-st.dataframe(run_query(long_sql, params), use_container_width=True)
+    st.subheader("Currently Running (SHOW QUERIES)")
+    if warehouses and "ALL" not in warehouses and len(warehouses) == 1:
+        running_df = run_show_queries(warehouses[0])
+        if "execution_status" in running_df.columns:
+            running_df = running_df[running_df["execution_status"] == "RUNNING"]
+        if running_df.empty:
+            st.info("SHOW QUERIES unavailable or empty. Using INFORMATION_SCHEMA fallback.")
+            running_df = run_running_queries_fallback(warehouses[0], fallback_window)
+        st.dataframe(running_df, use_container_width=True)
+    else:
+        st.info("Select a single warehouse to view running queries.")
 
+    st.subheader("Raw Query History")
+    raw_sql = f"""
+    SELECT
+      QUERY_ID,
+      USER_NAME,
+      WAREHOUSE_NAME,
+      DATABASE_NAME,
+      SCHEMA_NAME,
+      START_TIME,
+      END_TIME,
+      TOTAL_ELAPSED_TIME,
+      BYTES_SCANNED,
+      ROWS_PRODUCED,
+      EXECUTION_STATUS,
+      QUERY_TAG,
+      QUERY_TEXT
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE {base_where}
+    ORDER BY START_TIME DESC
+    LIMIT 500
+    """
+    st.dataframe(run_query(raw_sql, params), use_container_width=True)
 
-st.subheader("Currently Running (SHOW QUERIES)")
-if warehouses and "ALL" not in warehouses and len(warehouses) == 1:
-    running_df = run_show_queries(warehouses[0])
-    if "execution_status" in running_df.columns:
-        running_df = running_df[running_df["execution_status"] == "RUNNING"]
-    if running_df.empty:
-        st.info("SHOW QUERIES unavailable or empty. Using INFORMATION_SCHEMA fallback.")
-        running_df = run_running_queries_fallback(warehouses[0], fallback_window)
-    st.dataframe(running_df, use_container_width=True)
-else:
-    st.info("Select a single warehouse to view running queries.")
+    st.caption("Tip: ACCOUNT_USAGE data can lag 45–90 minutes. Use SHOW QUERIES for near real-time running queries.")
 
+with tab_cost:
+    st.subheader("Warehouse Credits (Hourly)")
+    cost_params = params.copy()
+    cost_params.update(wh_params)
+    wh_hour_sql = f"""
+    SELECT
+      DATE_TRUNC('hour', START_TIME) AS HOUR,
+      WAREHOUSE_NAME,
+      SUM(CREDITS_USED) AS CREDITS_USED
+    FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+    WHERE START_TIME >= %(start_ts)s
+      AND START_TIME <= %(end_ts)s
+      {wh_filter_sql}
+    GROUP BY 1, 2
+    ORDER BY 1 DESC
+    """
+    wh_hour_df = run_query(wh_hour_sql, cost_params)
+    if not wh_hour_df.empty:
+        st.line_chart(
+            wh_hour_df.pivot(index="HOUR", columns="WAREHOUSE_NAME", values="CREDITS_USED")
+        )
+    st.dataframe(wh_hour_df, use_container_width=True)
 
-st.subheader("Raw Query History")
-raw_sql = f"""
-SELECT
-  QUERY_ID,
-  USER_NAME,
-  WAREHOUSE_NAME,
-  DATABASE_NAME,
-  SCHEMA_NAME,
-  START_TIME,
-  END_TIME,
-  TOTAL_ELAPSED_TIME,
-  BYTES_SCANNED,
-  ROWS_PRODUCED,
-  EXECUTION_STATUS,
-  QUERY_TAG,
-  QUERY_TEXT
-FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-WHERE {base_where}
-ORDER BY START_TIME DESC
-LIMIT 500
-"""
-st.dataframe(run_query(raw_sql, params), use_container_width=True)
+    st.subheader("Warehouse Credits (Daily)")
+    wh_day_sql = f"""
+    SELECT
+      DATE_TRUNC('day', START_TIME) AS DAY,
+      WAREHOUSE_NAME,
+      SUM(CREDITS_USED) AS CREDITS_USED
+    FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+    WHERE START_TIME >= %(start_ts)s
+      AND START_TIME <= %(end_ts)s
+      {wh_filter_sql}
+    GROUP BY 1, 2
+    ORDER BY 1 DESC
+    """
+    wh_day_df = run_query(wh_day_sql, cost_params)
+    if not wh_day_df.empty:
+        st.line_chart(
+            wh_day_df.pivot(index="DAY", columns="WAREHOUSE_NAME", values="CREDITS_USED")
+        )
+    st.dataframe(wh_day_df, use_container_width=True)
 
-st.caption("Tip: ACCOUNT_USAGE data can lag 45–90 minutes. Use SHOW QUERIES for near real-time running queries.")
+    st.subheader("Estimated Query Cost (Credits)")
+    st.caption("Estimated by allocating warehouse credits by total elapsed time per warehouse-hour.")
+    cost_sql = f"""
+    WITH q AS (
+      SELECT
+        QUERY_ID,
+        USER_NAME,
+        WAREHOUSE_NAME,
+        START_TIME,
+        DATE_TRUNC('hour', START_TIME) AS HOUR,
+        TOTAL_ELAPSED_TIME,
+        QUERY_TEXT
+      FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+      WHERE {base_where}
+        AND WAREHOUSE_NAME IS NOT NULL
+    ),
+    wh AS (
+      SELECT
+        DATE_TRUNC('hour', START_TIME) AS HOUR,
+        WAREHOUSE_NAME,
+        SUM(CREDITS_USED) AS CREDITS_USED
+      FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+      WHERE START_TIME >= %(start_ts)s
+        AND START_TIME <= %(end_ts)s
+        {wh_filter_sql}
+      GROUP BY 1, 2
+    ),
+    totals AS (
+      SELECT HOUR, WAREHOUSE_NAME, SUM(TOTAL_ELAPSED_TIME) AS TOTAL_MS
+      FROM q
+      GROUP BY 1, 2
+    )
+    SELECT
+      q.QUERY_ID,
+      q.USER_NAME,
+      q.WAREHOUSE_NAME,
+      q.START_TIME,
+      q.TOTAL_ELAPSED_TIME,
+      q.QUERY_TEXT,
+      wh.CREDITS_USED,
+      (q.TOTAL_ELAPSED_TIME / NULLIF(t.TOTAL_MS, 0)) * wh.CREDITS_USED AS ESTIMATED_CREDITS
+    FROM q
+    LEFT JOIN totals t
+      ON q.HOUR = t.HOUR AND q.WAREHOUSE_NAME = t.WAREHOUSE_NAME
+    LEFT JOIN wh
+      ON q.HOUR = wh.HOUR AND q.WAREHOUSE_NAME = wh.WAREHOUSE_NAME
+    ORDER BY ESTIMATED_CREDITS DESC
+    LIMIT 50
+    """
+    st.dataframe(run_query(cost_sql, cost_params), use_container_width=True)
