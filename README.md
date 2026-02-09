@@ -86,4 +86,5 @@ streamlit run app.py
 
 - For multi-warehouse analytics, select multiple warehouses or `ALL` in the sidebar.
 - The live running view requires a single warehouse selection.
+- The running fallback window (15/30/60/120 minutes) is used only when `SHOW QUERIES` is unavailable.
 - Consider using a dedicated, least-privilege role for production use.
