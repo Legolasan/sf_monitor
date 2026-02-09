@@ -30,7 +30,7 @@ pip install -r requirements.txt
 
 Option A: `config.json` (recommended for local dev)
 
-Create a `config.json` file in the repo root (it is gitignored):
+Create a `config.json` file in the repo root (it is gitignored). You can copy `config.example.json`:
 
 ```json
 {
