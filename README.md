@@ -59,6 +59,23 @@ export SNOWFLAKE_SCHEMA=...
 
 Environment variables override values in `config.json` when both are provided.
 
+Option C: Streamlit secrets (useful for Streamlit Cloud or local `.streamlit/secrets.toml`):
+
+Create `.streamlit/secrets.toml`:
+
+```toml
+[snowflake]
+account = "xxx"
+user = "xxx"
+password = "xxx"
+warehouse = "FIVETRAN_WAREHOUSE"
+role = "xxx"
+database = "xxx"
+schema = "xxx"
+```
+
+Priority order: environment variables > Streamlit secrets > `config.json`.
+
 ## Run
 
 ```

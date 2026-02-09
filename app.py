@@ -25,6 +25,7 @@ def get_connection():
 
 def load_config() -> dict:
     cfg = {}
+    secrets_cfg = {}
     config_path = os.path.join(os.getcwd(), "config.json")
     if os.path.isfile(config_path):
         try:
@@ -33,6 +34,11 @@ def load_config() -> dict:
         except (OSError, json.JSONDecodeError):
             st.warning("Could not read config.json. Falling back to environment variables.")
             cfg = {}
+
+    try:
+        secrets_cfg = dict(st.secrets.get("snowflake", {}))
+    except Exception:
+        secrets_cfg = {}
 
     env_override = {
         "account": os.getenv("SNOWFLAKE_ACCOUNT", ""),
@@ -43,13 +49,16 @@ def load_config() -> dict:
         "schema": os.getenv("SNOWFLAKE_SCHEMA", ""),
         "role": os.getenv("SNOWFLAKE_ROLE", ""),
     }
+    merged = {}
+    merged.update(cfg)
+    merged.update(secrets_cfg)
     for key, value in env_override.items():
         if value:
-            cfg[key] = value
+            merged[key] = value
 
-    if "warehouse" not in cfg or not cfg["warehouse"]:
-        cfg["warehouse"] = DEFAULT_WAREHOUSE
-    return cfg
+    if "warehouse" not in merged or not merged["warehouse"]:
+        merged["warehouse"] = DEFAULT_WAREHOUSE
+    return merged
 
 @st.cache_data(ttl=300)
 def run_query(sql: str, params: dict | None = None) -> pd.DataFrame:
